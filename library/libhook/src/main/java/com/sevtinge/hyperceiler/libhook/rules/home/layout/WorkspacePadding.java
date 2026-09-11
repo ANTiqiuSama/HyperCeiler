@@ -49,6 +49,13 @@ public class WorkspacePadding extends HomeBaseHookNew {
         // declares the getters. That keeps older launchers on exactly the class they
         // already worked with, whichever one that is.
         mDeviceConfig = resolveDeviceConfigClass();
+        if (mDeviceConfig != null && mDeviceConfig.getName().equals(DEVICE_CONFIG_NEW)) {
+            // LayoutRules sets the new grid's outer workspace padding. These getters
+            // describe additional padding INSIDE each CellScreen; overriding them too
+            // applies the same inset twice (48 dp became 96 dp on the first row).
+            XposedLog.i(TAG, getPackageName(), "Workspace padding handled by LayoutRules");
+            return;
+        }
 
         // Capture a Context for dp2px. The signature differs between versions:
         //   old class: Init(Context, boolean) / Init(Context, int, boolean)
