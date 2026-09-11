@@ -19,9 +19,9 @@
 package com.sevtinge.hyperceiler.libhook.rules.home.layout;
 
 import static com.sevtinge.hyperceiler.libhook.utils.hookapi.tool.AppsTool.getPackageVersionCode;
+import static com.sevtinge.hyperceiler.libhook.utils.api.DeviceHelper.Miui.isPad;
 
 import android.content.Context;
-import android.content.res.Resources;
 
 import com.sevtinge.hyperceiler.common.log.XposedLog;
 import com.sevtinge.hyperceiler.common.utils.PrefsBridge;
@@ -38,54 +38,26 @@ public class WorkspacePadding extends HomeBaseHookNew {
 
     @Override
     public void initBase() {
-        // The workspace padding getters live on DeviceConfig (old) on some launcher
-        // versions and on DeviceConfigs (new) on others. The original code picked the
-        // class with `versionCode < 600000000 ? NEW : OLD`, which is inverted with respect
-        // to how every other home rule maps versions (@Version(min = 600000000) -> NEW).
-        // On a HyperOS 3.3 launcher (e.g. 750062372) that resolved the old class, where
-        // getWorkspaceCellPadding* no longer exists, so initBase() aborted with
-        // MemberNotFoundException.
-        // Rather than relying on a version number at all, pick whichever class actually
-        // declares the getters. That keeps older launchers on exactly the class they
-        // already worked with, whichever one that is.
-        mDeviceConfig = resolveDeviceConfigClass();
-        if (mDeviceConfig != null && mDeviceConfig.getName().equals(DEVICE_CONFIG_NEW)) {
-            // LayoutRules sets the new grid's outer workspace padding. These getters
-            // describe additional padding INSIDE each CellScreen; overriding them too
-            // applies the same inset twice (48 dp became 96 dp on the first row).
+        if (!isPad() && getPackageVersionCode(getLpparam()) >= 600000000) {
+            // LayoutRules owns outer padding on the new phone grid. CellScreen adds
+            // these legacy cell insets again, so using both doubles the first-row gap.
             XposedLog.i(TAG, getPackageName(), "Workspace padding handled by LayoutRules");
             return;
         }
+        mDeviceConfig = findClassIfExists(getPackageVersionCode(getLpparam()) < 600000000 ? DEVICE_CONFIG_NEW : DEVICE_CONFIG_OLD);
 
-        // Capture a Context for dp2px. The signature differs between versions:
-        //   old class: Init(Context, boolean) / Init(Context, int, boolean)
-        //   new class: init(Context, boolean)  (lower-case first letter)
-        // So hook every overload of either name and take the first Context argument.
-        IMethodHook captureContext = new IMethodHook() {
+        findAndHookMethod(mDeviceConfig, "Init", Context.class, boolean.class, new IMethodHook() {
             @Override
             public void before(HookParam param) {
-                for (Object arg : param.getArgs()) {
-                    if (arg instanceof Context) {
-                        mContext = (Context) arg;
-                        break;
-                    }
-                }
+                mContext = (Context) param.getArgs()[0];
             }
-        };
-        // DeviceConfig.Init may call DeviceConfigs getters before DeviceConfigs.init.
-        for (String name : new String[]{DEVICE_CONFIG_OLD, DEVICE_CONFIG_NEW}) {
-            Class<?> config = findClassIfExists(name);
-            if (config == null) continue;
-            hookAllMethods(config, "Init", captureContext);
-            hookAllMethods(config, "init", captureContext);
-        }
+        });
 
         if (PrefsBridge.getBoolean("home_layout_workspace_padding_bottom_enable")) {
             findAndHookMethod(mDeviceConfig, "getWorkspaceCellPaddingBottom", new IMethodHook() {
                 @Override
                 public void before(HookParam param) {
-                    int dp = PrefsBridge.getInt("home_layout_workspace_padding_bottom", 0);
-                    param.setResult(paddingPx(param, dp));
+                    param.setResult(DisplayUtils.dp2px(mContext, PrefsBridge.getInt("home_layout_workspace_padding_bottom", 0)));
                 }
             });
         }
@@ -96,14 +68,14 @@ public class WorkspacePadding extends HomeBaseHookNew {
                 findAndHookMethod(mDeviceConfig, "getWorkspaceCellPaddingTop", Context.class, new IMethodHook() {
                     @Override
                     public void before(HookParam param) {
-                        param.setResult(paddingPx(param, PrefsBridge.getInt("home_layout_workspace_padding_top", 0)));
+                        param.setResult(DisplayUtils.dp2px(PrefsBridge.getInt("home_layout_workspace_padding_top", 0)));
                     }
                 });
             } catch (Throwable t) {
                 findAndHookMethod(mDeviceConfig, "getWorkspaceCellPaddingTop", new IMethodHook() {
                     @Override
                     public void before(HookParam param) {
-                        param.setResult(paddingPx(param, PrefsBridge.getInt("home_layout_workspace_padding_top", 0)));
+                        param.setResult(DisplayUtils.dp2px(PrefsBridge.getInt("home_layout_workspace_padding_top", 0)));
                     }
                 });
             }
@@ -114,49 +86,9 @@ public class WorkspacePadding extends HomeBaseHookNew {
             findAndHookMethod(mDeviceConfig, "getWorkspaceCellPaddingSide", new IMethodHook() {
                 @Override
                 public void before(HookParam param) {
-                    param.setResult(paddingPx(param, PrefsBridge.getInt("home_layout_workspace_padding_horizontal", 0)));
+                    param.setResult(DisplayUtils.dp2px(PrefsBridge.getInt("home_layout_workspace_padding_horizontal", 0)));
                 }
             });
         }
-    }
-
-    private int paddingPx(HookParam param, int dp) {
-        for (Object arg : param.getArgs()) {
-            if (arg instanceof Context context) return DisplayUtils.dp2px(context, dp);
-        }
-        if (mContext != null) return DisplayUtils.dp2px(mContext, dp);
-        // These getters can run during Application.onCreate, before EzXposed exposes
-        // appContext. System resources remain available at this early stage.
-        return (int) (dp * Resources.getSystem().getDisplayMetrics().density + 0.5f);
-    }
-
-    /**
-     * Picks the DeviceConfig class that actually declares the workspace padding getters.
-     *
-     * Falls back to the version-based choice used elsewhere in the home rules
-     * (>= 600000000 -> DeviceConfigs) if neither class exposes them, so behaviour stays
-     * defined even on a launcher this was never tested against.
-     */
-    private Class<?> resolveDeviceConfigClass() {
-        for (String name : new String[]{DEVICE_CONFIG_NEW, DEVICE_CONFIG_OLD}) {
-            Class<?> clazz = findClassIfExists(name);
-            if (clazz != null && declaresPaddingGetter(clazz)) {
-                return clazz;
-            }
-        }
-        return findClassIfExists(getPackageVersionCode(getLpparam()) >= 600000000
-            ? DEVICE_CONFIG_NEW : DEVICE_CONFIG_OLD);
-    }
-
-    private boolean declaresPaddingGetter(Class<?> clazz) {
-        for (java.lang.reflect.Method method : clazz.getDeclaredMethods()) {
-            String name = method.getName();
-            if (name.equals("getWorkspaceCellPaddingBottom")
-                || name.equals("getWorkspaceCellPaddingTop")
-                || name.equals("getWorkspaceCellPaddingSide")) {
-                return true;
-            }
-        }
-        return false;
     }
 }
