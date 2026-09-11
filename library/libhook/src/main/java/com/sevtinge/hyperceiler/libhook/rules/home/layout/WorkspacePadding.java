@@ -21,6 +21,7 @@ package com.sevtinge.hyperceiler.libhook.rules.home.layout;
 import static com.sevtinge.hyperceiler.libhook.utils.hookapi.tool.AppsTool.getPackageVersionCode;
 
 import android.content.Context;
+import android.content.res.Resources;
 
 import com.sevtinge.hyperceiler.common.log.XposedLog;
 import com.sevtinge.hyperceiler.common.utils.PrefsBridge;
@@ -64,19 +65,20 @@ public class WorkspacePadding extends HomeBaseHookNew {
                 }
             }
         };
-        hookAllMethods(mDeviceConfig, "Init", captureContext);
-        hookAllMethods(mDeviceConfig, "init", captureContext);
+        // DeviceConfig.Init may call DeviceConfigs getters before DeviceConfigs.init.
+        for (String name : new String[]{DEVICE_CONFIG_OLD, DEVICE_CONFIG_NEW}) {
+            Class<?> config = findClassIfExists(name);
+            if (config == null) continue;
+            hookAllMethods(config, "Init", captureContext);
+            hookAllMethods(config, "init", captureContext);
+        }
 
         if (PrefsBridge.getBoolean("home_layout_workspace_padding_bottom_enable")) {
             findAndHookMethod(mDeviceConfig, "getWorkspaceCellPaddingBottom", new IMethodHook() {
                 @Override
                 public void before(HookParam param) {
                     int dp = PrefsBridge.getInt("home_layout_workspace_padding_bottom", 0);
-                    // Init/init does not necessarily run before the getter, so mContext
-                    // may still be null here
-                    param.setResult(mContext != null
-                        ? DisplayUtils.dp2px(mContext, dp)
-                        : DisplayUtils.dp2px(dp));
+                    param.setResult(paddingPx(param, dp));
                 }
             });
         }
@@ -87,14 +89,14 @@ public class WorkspacePadding extends HomeBaseHookNew {
                 findAndHookMethod(mDeviceConfig, "getWorkspaceCellPaddingTop", Context.class, new IMethodHook() {
                     @Override
                     public void before(HookParam param) {
-                        param.setResult(DisplayUtils.dp2px(PrefsBridge.getInt("home_layout_workspace_padding_top", 0)));
+                        param.setResult(paddingPx(param, PrefsBridge.getInt("home_layout_workspace_padding_top", 0)));
                     }
                 });
             } catch (Throwable t) {
                 findAndHookMethod(mDeviceConfig, "getWorkspaceCellPaddingTop", new IMethodHook() {
                     @Override
                     public void before(HookParam param) {
-                        param.setResult(DisplayUtils.dp2px(PrefsBridge.getInt("home_layout_workspace_padding_top", 0)));
+                        param.setResult(paddingPx(param, PrefsBridge.getInt("home_layout_workspace_padding_top", 0)));
                     }
                 });
             }
@@ -105,10 +107,20 @@ public class WorkspacePadding extends HomeBaseHookNew {
             findAndHookMethod(mDeviceConfig, "getWorkspaceCellPaddingSide", new IMethodHook() {
                 @Override
                 public void before(HookParam param) {
-                    param.setResult(DisplayUtils.dp2px(PrefsBridge.getInt("home_layout_workspace_padding_horizontal", 0)));
+                    param.setResult(paddingPx(param, PrefsBridge.getInt("home_layout_workspace_padding_horizontal", 0)));
                 }
             });
         }
+    }
+
+    private int paddingPx(HookParam param, int dp) {
+        for (Object arg : param.getArgs()) {
+            if (arg instanceof Context context) return DisplayUtils.dp2px(context, dp);
+        }
+        if (mContext != null) return DisplayUtils.dp2px(mContext, dp);
+        // These getters can run during Application.onCreate, before EzXposed exposes
+        // appContext. System resources remain available at this early stage.
+        return (int) (dp * Resources.getSystem().getDisplayMetrics().density + 0.5f);
     }
 
     /**
